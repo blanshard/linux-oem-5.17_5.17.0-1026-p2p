@@ -3018,7 +3018,8 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	struct kiocb *kiocb = &req->rw.kiocb;
 	unsigned ioprio;
 	int ret;
-
+	
+	struct io_ring_ctx *ctx = req->ctx;
 	u8 opcode = req->opcode;
 	
 	if(opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA)
