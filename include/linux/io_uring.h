@@ -4,9 +4,11 @@
 
 #include <linux/sched.h>
 #include <linux/xarray.h>
+#include <linux/blk-mq.h>
 
 #if defined(CONFIG_IO_URING)
 struct sock *io_uring_get_socket(struct file *file);
+int  io_uring_map_dmabuf(struct request *req);
 void __io_uring_cancel(bool cancel_all);
 void __io_uring_free(struct task_struct *tsk);
 

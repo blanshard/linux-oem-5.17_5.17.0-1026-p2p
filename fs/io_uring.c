@@ -81,6 +81,7 @@
 #include <linux/tracehook.h>
 #include <linux/audit.h>
 #include <linux/security.h>
+#include <linux/dma-buf.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/io_uring.h>
@@ -209,6 +210,7 @@ enum io_uring_cmd_flags {
 struct io_mapped_ubuf {
 	u64		ubuf;
 	u64		ubuf_end;
+	s32		dma_buf;
 	unsigned int	nr_bvecs;
 	unsigned long	acct_pages;
 	struct bio_vec	bvec[];
@@ -981,6 +983,23 @@ static const struct io_op_def io_op_defs[] = {
 		.audit_skip		= 1,
 		.async_size		= sizeof(struct io_async_rw),
 	},
+	[IORING_OP_READ_DMA] = {
+		.needs_file		= 1,
+		.unbound_nonreg_file	= 1,
+		.pollin			= 1,
+		.plug			= 1,
+		.audit_skip		= 1,
+		.async_size		= sizeof(struct io_async_rw),
+	},
+	[IORING_OP_WRITE_DMA] = {
+		.needs_file		= 1,
+		.hash_reg_file		= 1,
+		.unbound_nonreg_file	= 1,
+		.pollout		= 1,
+		.plug			= 1,
+		.audit_skip		= 1,
+		.async_size		= sizeof(struct io_async_rw),
+	},	
 	[IORING_OP_POLL_ADD] = {
 		.needs_file		= 1,
 		.unbound_nonreg_file	= 1,
@@ -1170,6 +1189,41 @@ struct sock *io_uring_get_socket(struct file *file)
 	return NULL;
 }
 EXPORT_SYMBOL(io_uring_get_socket);
+
+int io_uring_map_dmabuf(struct request *req)
+{
+	struct bio_vec bvec;
+	struct req_iterator iter;
+	unsigned int i, j;
+
+	struct io_uring_task *tctx = current->io_uring;
+
+	if (current->io_uring == NULL)
+		return 0;
+
+	struct io_ring_ctx *ctx = tctx->last;
+	struct io_mapped_ubuf *imu;
+	//printk(KERN_INFO "io_uring: io_uring_map_dmabuf ctx.sq_entries %u ctx.nr_user_bufs %u\n", ctx->sq_entries, ctx->nr_user_bufs);
+
+	rq_for_each_segment(bvec, req, iter) {
+		printk(KERN_INFO "io_uring: io_uring_map_dmabuf bvec.index %lu bvec.bv_len %u\n", bvec.bv_page->index, bvec.bv_len);
+
+		for (i = 0; i < ctx->nr_user_bufs; i++) {
+			imu = ctx->user_bufs[i];
+			for (j = 0; j < imu->nr_bvecs; j++) {
+				if(bvec.bv_page->index == imu->bvec[j].bv_page->index) {
+					printk(KERN_INFO "io_uring: io_uring_map_dmabuf imu.dma_buf %u\n", imu->dma_buf);
+					return imu->dma_buf;
+				}
+				//printk(KERN_INFO "io_uring: io_uring_map_dmabuf imu.bvec.index %lu imu.bvec.bv_len %u\n", imu->bvec[j].bv_page->index, imu->bvec[j].bv_len);
+			}
+		}
+	}
+
+	return 0;
+}
+
+EXPORT_SYMBOL(io_uring_map_dmabuf);
 
 static inline void io_tw_lock(struct io_ring_ctx *ctx, bool *locked)
 {
@@ -2965,6 +3019,16 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	unsigned ioprio;
 	int ret;
 
+	u8 opcode = req->opcode;
+	
+	if(opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA)
+	{
+		printk(KERN_INFO "io_uring: io_prep_rw() SQE buf_index %u\n",  sqe->buf_index);		
+		printk(KERN_INFO "io_uring: io_prep_rw() SQE fd_dma_buf %u\n", sqe->fd_dma_buf);
+
+		ctx->user_bufs[sqe->buf_index]->dma_buf = sqe->fd_dma_buf;			
+	}
+
 	kiocb->ki_pos = READ_ONCE(sqe->off);
 
 	ioprio = READ_ONCE(sqe->ioprio);
@@ -3264,7 +3328,8 @@ static struct iovec *__io_import_iovec(int rw, struct io_kiocb *req,
 	size_t sqe_len;
 	ssize_t ret;
 
-	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED) {
+	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED
+		|| opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA) {
 		ret = io_import_fixed(req, rw, iter, issue_flags);
 		if (ret)
 			return ERR_PTR(ret);
@@ -6518,9 +6583,11 @@ static int io_req_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	case IORING_OP_READV:
 	case IORING_OP_READ_FIXED:
 	case IORING_OP_READ:
+	case IORING_OP_READ_DMA:
 	case IORING_OP_WRITEV:
 	case IORING_OP_WRITE_FIXED:
 	case IORING_OP_WRITE:
+	case IORING_OP_WRITE_DMA:
 		return io_prep_rw(req, sqe);
 	case IORING_OP_POLL_ADD:
 		return io_poll_add_prep(req, sqe);
@@ -6689,9 +6756,11 @@ static void io_clean_op(struct io_kiocb *req)
 		case IORING_OP_READV:
 		case IORING_OP_READ_FIXED:
 		case IORING_OP_READ:
+		case IORING_OP_READ_DMA:
 		case IORING_OP_WRITEV:
 		case IORING_OP_WRITE_FIXED:
-		case IORING_OP_WRITE: {
+		case IORING_OP_WRITE:
+		case IORING_OP_WRITE_DMA: {
 			struct io_async_rw *io = req->async_data;
 
 			kfree(io->free_iovec);
@@ -6781,11 +6850,13 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 	case IORING_OP_READV:
 	case IORING_OP_READ_FIXED:
 	case IORING_OP_READ:
+	case IORING_OP_READ_DMA:
 		ret = io_read(req, issue_flags);
 		break;
 	case IORING_OP_WRITEV:
 	case IORING_OP_WRITE_FIXED:
 	case IORING_OP_WRITE:
+	case IORING_OP_WRITE_DMA:
 		ret = io_write(req, issue_flags);
 		break;
 	case IORING_OP_FSYNC:
@@ -9257,6 +9328,8 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, struct iovec *iov,
 		imu->bvec[i].bv_offset = off;
 		off = 0;
 		size -= vec_len;
+
+		printk(KERN_INFO "io_uring: io_sqe_buffer_register imu->bvec[i].bv_page.index %lu imu->bvec[i].bv_len %u\n", imu->bvec[i].bv_page->index, imu->bvec[i].bv_len);
 	}
 	/* store original address for later verification */
 	imu->ubuf = ubuf;

@@ -60,7 +60,9 @@ struct io_uring_sqe {
 		__s32	splice_fd_in;
 		__u32	file_index;
 	};
-	__u64	__pad2[2];
+	__s32   fd_dma_buf;   /* dma_buf fd */
+	__u32   __pad;
+	__u64	__pad2;
 };
 
 enum {
@@ -109,6 +111,8 @@ enum {
 	IORING_OP_FSYNC,
 	IORING_OP_READ_FIXED,
 	IORING_OP_WRITE_FIXED,
+	IORING_OP_READ_DMA,
+	IORING_OP_WRITE_DMA,	
 	IORING_OP_POLL_ADD,
 	IORING_OP_POLL_REMOVE,
 	IORING_OP_SYNC_FILE_RANGE,

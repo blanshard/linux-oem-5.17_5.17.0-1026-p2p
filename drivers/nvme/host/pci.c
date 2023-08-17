@@ -27,6 +27,8 @@
 #include <linux/io-64-nonatomic-hi-lo.h>
 #include <linux/sed-opal.h>
 #include <linux/pci-p2pdma.h>
+#include <linux/io_uring.h>
+#include <linux/dma-buf.h>
 
 #include "trace.h"
 #include "nvme.h"
@@ -834,12 +836,93 @@ static blk_status_t nvme_setup_sgl_simple(struct nvme_dev *dev,
 	return BLK_STS_OK;
 }
 
+static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *req,
+               struct nvme_command *cmnd, bool *is_dmabuf_io)
+{
+    struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+    enum dma_data_direction dma_dir = rq_dma_dir(req);
+    blk_status_t ret = BLK_STS_RESOURCE;
+    int nr_mapped;
+    int dma_buf_fd;
+
+    struct dma_buf *dmabuf;
+    struct dma_buf_attachment *attach;
+    struct sg_table *sgt;
+    nr_mapped = 0;
+
+    *is_dmabuf_io = false;
+    dma_buf_fd = io_uring_map_dmabuf(req);
+
+    if (dma_buf_fd != 0) {
+        printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_fd %d\n", dma_buf_fd);
+
+        dmabuf = dma_buf_get(dma_buf_fd);
+        if (IS_ERR(dmabuf)) {
+            printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_get error!\n");
+        }
+
+        attach = dma_buf_attach(dmabuf, dev->dev);
+        if (IS_ERR(attach)) {
+            printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_attach error!\n");
+        }
+
+        printk(KERN_INFO "nvme_dmabuf_map_data attach->dmabuf->size %lu\n", attach->dmabuf->size);
+
+        sgt = dma_buf_map_attachment(attach, dma_dir);
+        printk(KERN_INFO "nvme_dmabuf_map_data sgt->nents %u\n", sgt->nents);
+    	printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->page_link %lx\n", sgt->sgl->page_link & (SG_CHAIN | SG_END));
+        printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->offset %u\n", sgt->sgl->offset);
+        printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->length %u\n", sgt->sgl->length);
+        printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->dma_address %llu\n", sgt->sgl->dma_address);
+        /*
+        if (IS_ERR(dmabuf)) {
+            goto get_err;
+        }
+        */
+        printk(KERN_INFO "nvme_dmabuf_map_data dmabuf->size %lu\n", dmabuf->size);
+
+        iod->dma_len = 0;
+        iod->sg = sgt->sgl;
+        iod->nents = sgt->nents;
+        nr_mapped = sgt->nents;
+
+        iod->use_sgl = nvme_pci_use_sgls(dev, req);
+        if (iod->use_sgl)
+            ret = nvme_pci_setup_sgls(dev, req, &cmnd->rw, nr_mapped);
+        else
+        	ret = nvme_pci_setup_prps(dev, req, &cmnd->rw);
+
+        printk(KERN_INFO "nvme_dmabuf_map_data ret %d\n", ret);
+
+        *is_dmabuf_io = true;
+        return ret;
+    }
+    return ret;
+/*
+map_err:
+    dma_buf_detach(map->buf, map->attach);
+
+attach_err:
+    dma_buf_put(map->buf);
+
+get_err:
+    fastrpc_map_put(map);
+*/
+}
+
+
 static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
 		struct nvme_command *cmnd)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
 	blk_status_t ret = BLK_STS_RESOURCE;
 	int nr_mapped;
+
+	bool is_dmabuf_io;
+	ret = nvme_dmabuf_map_data(dev, req, cmnd, &is_dmabuf_io);
+	if(is_dmabuf_io) {
+		return ret;
+	}
 
 	if (blk_rq_nr_phys_segments(req) == 1) {
 		struct bio_vec bv = req_bvec(req);
@@ -3518,3 +3601,4 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION("1.0");
 module_init(nvme_init);
 module_exit(nvme_exit);
+MODULE_IMPORT_NS(DMA_BUF);
