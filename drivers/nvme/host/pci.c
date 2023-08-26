@@ -859,27 +859,35 @@ static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *r
         dmabuf = dma_buf_get(dma_buf_fd);
         if (IS_ERR(dmabuf)) {
             printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_get error!\n");
+			return ret;
         }
 
+		printk(KERN_INFO "nvme_dmabuf_map_data dmabuf->size %lu\n", dmabuf->size);
+		printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_is_dynamic %d\n", dma_buf_is_dynamic(dmabuf));
+		printk("nvme_dmabuf_map_data %pS\n", (void *)dmabuf->ops->attach);
+		
         attach = dma_buf_attach(dmabuf, dev->dev);
         if (IS_ERR(attach)) {
             printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_attach error!\n");
+			goto attach_err;
         }
 
         printk(KERN_INFO "nvme_dmabuf_map_data attach->dmabuf->size %lu\n", attach->dmabuf->size);
 
         sgt = dma_buf_map_attachment(attach, dma_dir);
+
+        if (IS_ERR(sgt)) {
+            goto map_err;
+        }
+
+		// hack
+		sgt->sgl->length = 4096;
+
         printk(KERN_INFO "nvme_dmabuf_map_data sgt->nents %u\n", sgt->nents);
     	printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->page_link %lx\n", sgt->sgl->page_link & (SG_CHAIN | SG_END));
         printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->offset %u\n", sgt->sgl->offset);
         printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->length %u\n", sgt->sgl->length);
         printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->dma_address %llu\n", sgt->sgl->dma_address);
-        /*
-        if (IS_ERR(dmabuf)) {
-            goto get_err;
-        }
-        */
-        printk(KERN_INFO "nvme_dmabuf_map_data dmabuf->size %lu\n", dmabuf->size);
 
         iod->dma_len = 0;
         iod->sg = sgt->sgl;
@@ -894,20 +902,22 @@ static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *r
 
         printk(KERN_INFO "nvme_dmabuf_map_data ret %d\n", ret);
 
+		return ret;		
+
         *is_dmabuf_io = true;
+
         return ret;
     }
-    return ret;
-/*
+
+	return ret;
+
 map_err:
-    dma_buf_detach(map->buf, map->attach);
+    dma_buf_detach(dmabuf, attach);
 
 attach_err:
-    dma_buf_put(map->buf);
+    dma_buf_put(dmabuf);
 
-get_err:
-    fastrpc_map_put(map);
-*/
+	return ret;
 }
 
 
@@ -918,8 +928,9 @@ static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
 	blk_status_t ret = BLK_STS_RESOURCE;
 	int nr_mapped;
 
-	bool is_dmabuf_io;
+	bool is_dmabuf_io = false;
 	ret = nvme_dmabuf_map_data(dev, req, cmnd, &is_dmabuf_io);
+	
 	if(is_dmabuf_io) {
 		return ret;
 	}
