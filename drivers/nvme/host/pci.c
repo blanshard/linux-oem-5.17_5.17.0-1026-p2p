@@ -236,6 +236,7 @@ struct nvme_iod {
 	unsigned int dma_len;	/* length of single DMA segment mapping */
 	dma_addr_t meta_dma;
 	struct scatterlist *sg;
+	struct io_uring_dma_buf *uring_dmabuf;
 };
 
 static inline unsigned int nvme_dbbuf_size(struct nvme_dev *dev)
@@ -576,9 +577,37 @@ static void nvme_free_sgls(struct nvme_dev *dev, struct request *req)
 	}
 }
 
+static void nvme_dmabuf_release(struct io_uring_dma_buf *uring_dmabuf)
+{
+	// restore orig sgl
+	sg_dma_address(uring_dmabuf->sgt->sgl) -= uring_dmabuf->dma_buf_offset;
+	uring_dmabuf->sgt->sgl->length          = uring_dmabuf->attach->dmabuf->size;
+	uring_dmabuf->sgt->sgl->dma_length      = uring_dmabuf->attach->dmabuf->size;
+
+	//unmap dma_buf dma_buf_unmap_attachment
+	// dma_buf_unmap_attachment(uring_dmabuf->attach, uring_dmabuf->sgt, rq_dma_dir(req));
+
+	// detach dma_buf
+	// dma_buf_detach(uring_dmabuf->attach->dmabuf, uring_dmabuf->attach);
+			
+	// put dma_buf
+	// dma_buf_put(uring_dmabuf->attach->dmabuf);
+
+	// free
+	kfree(uring_dmabuf);
+}
+
+
 static void nvme_unmap_sg(struct nvme_dev *dev, struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+
+	if(iod->uring_dmabuf != NULL)
+	{
+		//printk(KERN_INFO "nvme_unmap_sg iod->sg->dma_address %llu dma_buf_fd %d\n", iod->sg->dma_address, iod->uring_dmabuf->dma_buf_fd);
+		nvme_dmabuf_release(iod->uring_dmabuf);
+		return;
+	}
 
 	if (is_pci_p2pdma_page(sg_page(iod->sg)))
 		pci_p2pdma_unmap_sg(dev->dev, iod->sg, iod->nents,
@@ -705,6 +734,8 @@ static blk_status_t nvme_pci_setup_prps(struct nvme_dev *dev,
 done:
 	cmnd->dptr.prp1 = cpu_to_le64(sg_dma_address(iod->sg));
 	cmnd->dptr.prp2 = cpu_to_le64(iod->first_dma);
+	//if(iod->uring_dmabuf != NULL)
+	//	printk(KERN_INFO "nvme_pci_setup_prps: opcode: %u slba: %llu length: %u prp1: %llu prp2: %llu\n", cmnd->opcode, cmnd->slba, cmnd->length, cmnd->dptr.prp1, cmnd->dptr.prp2);	
 	return BLK_STS_OK;
 free_prps:
 	nvme_free_prps(dev, req);
@@ -836,73 +867,108 @@ static blk_status_t nvme_setup_sgl_simple(struct nvme_dev *dev,
 	return BLK_STS_OK;
 }
 
+static void nvme_dmabuf_invalidate_cb(struct dma_buf_attachment *attach)
+{
+
+}
+
+static struct dma_buf_attach_ops dmabuf_attach_pinned_ops = {
+	.allow_peer2peer = true,
+	.move_notify = nvme_dmabuf_invalidate_cb,
+};
+
+
 static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *req,
                struct nvme_command *cmnd, bool *is_dmabuf_io)
 {
     struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
     enum dma_data_direction dma_dir = rq_dma_dir(req);
     blk_status_t ret = BLK_STS_RESOURCE;
-    int nr_mapped;
-    int dma_buf_fd;
-
+	unsigned int req_size = blk_rq_payload_bytes(req);
     struct dma_buf *dmabuf;
-    struct dma_buf_attachment *attach;
-    struct sg_table *sgt;
-    nr_mapped = 0;
+	struct io_uring_dma_buf *uring_dmabuf;
+	//struct bio_vec bvec;
+	//struct req_iterator iter;
+	//struct scatterlist *sg;	
+	//int i;
+	int err;
+	int nr_mapped = 0;
 
     *is_dmabuf_io = false;
-    dma_buf_fd = io_uring_map_dmabuf(req);
 
-    if (dma_buf_fd != 0) {
-        printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_fd %d\n", dma_buf_fd);
+	//if(!is_io_uring_task())
+	//	return ret;
 
-        dmabuf = dma_buf_get(dma_buf_fd);
+	uring_dmabuf = io_uring_get_dmabuf(req);
+
+    if (uring_dmabuf != NULL) {
+        printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_fd %d offset %d\n", uring_dmabuf->dma_buf_fd, uring_dmabuf->dma_buf_offset);
+
+		//rq_for_each_segment(bvec, req, iter)
+		//	printk(KERN_INFO "nvme_dmabuf_map_data bvec.index %lu bvec.bv_len %u bv_offset %u\n", bvec.bv_page->index, bvec.bv_len, bvec.bv_offset);
+
+		iod->uring_dmabuf =  uring_dmabuf;
+
+        dmabuf = dma_buf_get(uring_dmabuf->dma_buf_fd);
         if (IS_ERR(dmabuf)) {
-            printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_get error!\n");
 			return ret;
         }
 
-		printk(KERN_INFO "nvme_dmabuf_map_data dmabuf->size %lu\n", dmabuf->size);
-		printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_is_dynamic %d\n", dma_buf_is_dynamic(dmabuf));
-		printk("nvme_dmabuf_map_data %pS\n", (void *)dmabuf->ops->attach);
+		//printk(KERN_INFO "nvme_dmabuf_map_data dmabuf->size %lu\n", dmabuf->size);
+		//printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_is_dynamic %d\n", dma_buf_is_dynamic(dmabuf));
+		//printk("nvme_dmabuf_map_data %pS\n", (void *)dmabuf->ops->attach);
 		
-        attach = dma_buf_attach(dmabuf, dev->dev);
-        if (IS_ERR(attach)) {
-            printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_attach error!\n");
+        uring_dmabuf->attach = dma_buf_dynamic_attach(dmabuf, 
+							   			dev->dev,
+							   			&dmabuf_attach_pinned_ops,
+							   			NULL);
+        if (IS_ERR(uring_dmabuf->attach)) {
 			goto attach_err;
         }
 
-        printk(KERN_INFO "nvme_dmabuf_map_data attach->dmabuf->size %lu\n", attach->dmabuf->size);
+		// This might not be necessary, i915 GPU KMD pins the memory as part of the attachment
+		err = dma_buf_pin(uring_dmabuf->attach);
+		if (err)
+			goto map_err;
 
-        sgt = dma_buf_map_attachment(attach, dma_dir);
+        //printk(KERN_INFO "nvme_dmabuf_map_data attach->dmabuf->size %lu\n", uring_dmabuf->attach->dmabuf->size);
 
-        if (IS_ERR(sgt)) {
+        uring_dmabuf->sgt = dma_buf_map_attachment(uring_dmabuf->attach, dma_dir);
+
+        if (IS_ERR(uring_dmabuf->sgt)) {
             goto map_err;
         }
 
-		// hack
-		sgt->sgl->length = 4096;
+		/*
+		for_each_sg(uring_dmabuf->sgt->sgl, sg, uring_dmabuf->sgt->nents, i) {
+			printk(KERN_INFO "nvme_dmabuf_map_data addr %llu sg->length %llu\n", sg_dma_address(sg), sg->length);
+		}
+		*/
 
-        printk(KERN_INFO "nvme_dmabuf_map_data sgt->nents %u\n", sgt->nents);
-    	printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->page_link %lx\n", sgt->sgl->page_link & (SG_CHAIN | SG_END));
-        printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->offset %u\n", sgt->sgl->offset);
-        printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->length %u\n", sgt->sgl->length);
-        printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->dma_address %llu\n", sgt->sgl->dma_address);
+		// update the sgl per request size and offset
+		if( (uring_dmabuf->dma_buf_offset + req_size) <= uring_dmabuf->sgt->sgl->length)
+		{
+			uring_dmabuf->sgt->sgl->length     = req_size;
+			uring_dmabuf->sgt->sgl->dma_length = req_size;
+			sg_dma_address(uring_dmabuf->sgt->sgl) += uring_dmabuf->dma_buf_offset;
+		}
+
+        //printk(KERN_INFO "nvme_dmabuf_map_data sgt->nents %u\n", uring_dmabuf->sgt->nents);
+    	//printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->page_link %lx\n", uring_dmabuf->sgt->sgl->page_link & (SG_CHAIN | SG_END));
+        //printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->offset %u\n", uring_dmabuf->sgt->sgl->offset);
+        //printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->length %u\n", uring_dmabuf->sgt->sgl->length);
+        //printk(KERN_INFO "nvme_dmabuf_map_data sgt->sgl->dma_address %llu\n", uring_dmabuf->sgt->sgl->dma_address);
 
         iod->dma_len = 0;
-        iod->sg = sgt->sgl;
-        iod->nents = sgt->nents;
-        nr_mapped = sgt->nents;
+        iod->sg = uring_dmabuf->sgt->sgl;
+        iod->nents = uring_dmabuf->sgt->nents;
+        nr_mapped = uring_dmabuf->sgt->nents;
 
         iod->use_sgl = nvme_pci_use_sgls(dev, req);
         if (iod->use_sgl)
             ret = nvme_pci_setup_sgls(dev, req, &cmnd->rw, nr_mapped);
         else
         	ret = nvme_pci_setup_prps(dev, req, &cmnd->rw);
-
-        printk(KERN_INFO "nvme_dmabuf_map_data ret %d\n", ret);
-
-		return ret;		
 
         *is_dmabuf_io = true;
 
@@ -912,14 +978,13 @@ static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *r
 	return ret;
 
 map_err:
-    dma_buf_detach(dmabuf, attach);
+    dma_buf_detach(dmabuf, uring_dmabuf->attach);
 
 attach_err:
     dma_buf_put(dmabuf);
 
 	return ret;
 }
-
 
 static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
 		struct nvme_command *cmnd)
@@ -1005,6 +1070,7 @@ static blk_status_t nvme_prep_rq(struct nvme_dev *dev, struct request *req)
 	iod->aborted = 0;
 	iod->npages = -1;
 	iod->nents = 0;
+	iod->uring_dmabuf = NULL;
 
 	ret = nvme_setup_cmd(req->q->queuedata, req);
 	if (ret)

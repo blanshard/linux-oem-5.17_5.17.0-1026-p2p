@@ -211,6 +211,7 @@ struct io_mapped_ubuf {
 	u64		ubuf;
 	u64		ubuf_end;
 	s32		dma_buf;
+	s32		dma_buf_offset;
 	unsigned int	nr_bvecs;
 	unsigned long	acct_pages;
 	struct bio_vec	bvec[];
@@ -1190,40 +1191,48 @@ struct sock *io_uring_get_socket(struct file *file)
 }
 EXPORT_SYMBOL(io_uring_get_socket);
 
-int io_uring_map_dmabuf(struct request *req)
+bool is_io_uring_task(void)
 {
+	if (current->io_uring == NULL)
+		return false;
+	
+	return true;
+}
+EXPORT_SYMBOL(is_io_uring_task);
+
+struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req)
+{
+	struct io_uring_task *tctx = current->io_uring;
 	struct bio_vec bvec;
 	struct req_iterator iter;
+	struct io_ring_ctx *ctx;
+	struct io_mapped_ubuf *imu;
+	struct io_uring_dma_buf *uring_dmabuf;
 	unsigned int i, j;
 
-	struct io_uring_task *tctx = current->io_uring;
-
 	if (current->io_uring == NULL)
-		return 0;
-
-	struct io_ring_ctx *ctx = tctx->last;
-	struct io_mapped_ubuf *imu;
-	//printk(KERN_INFO "io_uring: io_uring_map_dmabuf ctx.sq_entries %u ctx.nr_user_bufs %u\n", ctx->sq_entries, ctx->nr_user_bufs);
+		return NULL;
+		
+	ctx = tctx->last;
 
 	rq_for_each_segment(bvec, req, iter) {
-		printk(KERN_INFO "io_uring: io_uring_map_dmabuf bvec.index %lu bvec.bv_len %u\n", bvec.bv_page->index, bvec.bv_len);
-
 		for (i = 0; i < ctx->nr_user_bufs; i++) {
 			imu = ctx->user_bufs[i];
 			for (j = 0; j < imu->nr_bvecs; j++) {
+				// all bvecs should be aligned with same shadow buffer, same dmabuf 
 				if(bvec.bv_page->index == imu->bvec[j].bv_page->index) {
-					printk(KERN_INFO "io_uring: io_uring_map_dmabuf imu.dma_buf %u\n", imu->dma_buf);
-					return imu->dma_buf;
+					uring_dmabuf = kzalloc(sizeof(*uring_dmabuf), GFP_KERNEL);
+					uring_dmabuf->dma_buf_fd = imu->dma_buf;
+					uring_dmabuf->dma_buf_offset = imu->dma_buf_offset;
+					return uring_dmabuf;
 				}
-				//printk(KERN_INFO "io_uring: io_uring_map_dmabuf imu.bvec.index %lu imu.bvec.bv_len %u\n", imu->bvec[j].bv_page->index, imu->bvec[j].bv_len);
 			}
 		}
 	}
 
-	return 0;
+	return NULL;
 }
-
-EXPORT_SYMBOL(io_uring_map_dmabuf);
+EXPORT_SYMBOL(io_uring_get_dmabuf);
 
 static inline void io_tw_lock(struct io_ring_ctx *ctx, bool *locked)
 {
@@ -3024,10 +3033,11 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	
 	if(opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA)
 	{
-		printk(KERN_INFO "io_uring: io_prep_rw() SQE buf_index %u\n",  sqe->buf_index);		
-		printk(KERN_INFO "io_uring: io_prep_rw() SQE fd_dma_buf %u\n", sqe->fd_dma_buf);
+		//printk(KERN_INFO "io_uring: io_prep_rw() SQE buf_index %u\n",  sqe->buf_index);	
+		//printk(KERN_INFO "io_uring: io_prep_rw() SQE fd_dma_buf %u\n", sqe->fd_dma_buf);
 
-		ctx->user_bufs[sqe->buf_index]->dma_buf = sqe->fd_dma_buf;			
+		ctx->user_bufs[sqe->buf_index]->dma_buf = sqe->fd_dma_buf;
+		ctx->user_bufs[sqe->buf_index]->dma_buf_offset = sqe->off;	
 	}
 
 	kiocb->ki_pos = READ_ONCE(sqe->off);
