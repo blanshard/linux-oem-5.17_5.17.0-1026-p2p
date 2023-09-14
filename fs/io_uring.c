@@ -1214,6 +1214,9 @@ struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req)
 		return NULL;
 		
 	ctx = tctx->last;
+	
+	if (ctx == NULL)
+		return NULL;
 
 	rq_for_each_segment(bvec, req, iter) {
 		for (i = 0; i < ctx->nr_user_bufs; i++) {

@@ -29,6 +29,7 @@
 #include <linux/pci-p2pdma.h>
 #include <linux/io_uring.h>
 #include <linux/dma-buf.h>
+#include <linux/dma-resv.h>
 
 #include "trace.h"
 #include "nvme.h"
@@ -579,6 +580,12 @@ static void nvme_free_sgls(struct nvme_dev *dev, struct request *req)
 
 static void nvme_dmabuf_release(struct io_uring_dma_buf *uring_dmabuf)
 {
+	//printk(KERN_INFO "nvme_dmabuf_release uring_dmabuf->sgt->sgl dma_address %llu length %u dma_length %u\n", 
+	//	sg_dma_address(uring_dmabuf->sgt->sgl), uring_dmabuf->sgt->sgl->length, uring_dmabuf->sgt->sgl->dma_length);
+
+	//printk(KERN_INFO "nvme_dmabuf_release uring_dmabuf->attach->sgt->sgl dma_address %llu length %u dma_length %u\n", 
+	//	sg_dma_address(uring_dmabuf->attach->sgt->sgl), uring_dmabuf->attach->sgt->sgl->length, uring_dmabuf->attach->sgt->sgl->dma_length);	
+
 	// restore orig sgl
 	sg_dma_address(uring_dmabuf->sgt->sgl) -= uring_dmabuf->dma_buf_offset;
 	uring_dmabuf->sgt->sgl->length          = uring_dmabuf->attach->dmabuf->size;
@@ -902,7 +909,7 @@ static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *r
 	uring_dmabuf = io_uring_get_dmabuf(req);
 
     if (uring_dmabuf != NULL) {
-        printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_fd %d offset %d\n", uring_dmabuf->dma_buf_fd, uring_dmabuf->dma_buf_offset);
+        //printk(KERN_INFO "nvme_dmabuf_map_data dma_buf_fd %d offset %d\n", uring_dmabuf->dma_buf_fd, uring_dmabuf->dma_buf_offset);
 
 		//rq_for_each_segment(bvec, req, iter)
 		//	printk(KERN_INFO "nvme_dmabuf_map_data bvec.index %lu bvec.bv_len %u bv_offset %u\n", bvec.bv_page->index, bvec.bv_len, bvec.bv_offset);
@@ -926,7 +933,7 @@ static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *r
 			goto attach_err;
         }
 
-		// This might not be necessary, i915 GPU KMD pins the memory as part of the attachment
+		dma_resv_lock(uring_dmabuf->attach->dmabuf->resv, NULL);
 		err = dma_buf_pin(uring_dmabuf->attach);
 		if (err)
 			goto map_err;
@@ -934,6 +941,7 @@ static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *r
         //printk(KERN_INFO "nvme_dmabuf_map_data attach->dmabuf->size %lu\n", uring_dmabuf->attach->dmabuf->size);
 
         uring_dmabuf->sgt = dma_buf_map_attachment(uring_dmabuf->attach, dma_dir);
+		dma_resv_unlock(uring_dmabuf->attach->dmabuf->resv);
 
         if (IS_ERR(uring_dmabuf->sgt)) {
             goto map_err;
