@@ -11,15 +11,17 @@
 #if defined(CONFIG_IO_URING)
 
 struct io_uring_dma_buf {
-    struct dma_buf_attachment *attach;
-    struct sg_table *sgt;
-	int dma_buf_fd;
-	int dma_buf_offset;
+    struct       dma_buf_attachment *attach;
+    struct       sg_table *sgt;
+	unsigned int dma_buf_fd;
+	unsigned int orig_sgl_len;
+	dma_addr_t	 orig_dma_address;
+	unsigned int curr_io_offset;	
 };
 
 struct sock *io_uring_get_socket(struct file *file);
 bool   is_io_uring_task(void);
-struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req);
+struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req, struct device *dev);
 void __io_uring_cancel(bool cancel_all);
 void __io_uring_free(struct task_struct *tsk);
 

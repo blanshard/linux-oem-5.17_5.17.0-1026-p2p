@@ -82,6 +82,8 @@
 #include <linux/audit.h>
 #include <linux/security.h>
 #include <linux/dma-buf.h>
+#include <linux/dma-resv.h>
+#include <linux/dma-direction.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/io_uring.h>
@@ -375,6 +377,7 @@ struct io_ring_ctx {
 		unsigned		nr_user_files;
 		unsigned		nr_user_bufs;
 		struct io_mapped_ubuf	**user_bufs;
+		struct io_uring_dma_buf *uring_dmabuf;
 
 		struct io_submit_state	submit_state;
 		struct list_head	timeout_list;
@@ -1200,16 +1203,84 @@ bool is_io_uring_task(void)
 }
 EXPORT_SYMBOL(is_io_uring_task);
 
-struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req)
+static void dmabuf_invalidate_cb(struct dma_buf_attachment *attach)
 {
-	struct io_uring_task *tctx = current->io_uring;
+
+}
+
+static struct dma_buf_attach_ops dmabuf_attach_pinned_ops = {
+	.allow_peer2peer = true,
+	.move_notify = dmabuf_invalidate_cb,
+};
+
+static void dmabuf_release(struct io_uring_dma_buf *uring_dmabuf)
+{
+	// restore orig sgl
+	sg_dma_address(uring_dmabuf->sgt->sgl)  = uring_dmabuf->orig_dma_address;
+	uring_dmabuf->sgt->sgl->length          = uring_dmabuf->orig_sgl_len;
+	uring_dmabuf->sgt->sgl->dma_length      = uring_dmabuf->orig_sgl_len;
+
+	//printk(KERN_INFO "nvme_dmabuf_release uring_dmabuf->sgt->sgl dma_address %llu length %u dma_length %u\n", 
+	//	sg_dma_address(uring_dmabuf->sgt->sgl), uring_dmabuf->sgt->sgl->length, uring_dmabuf->sgt->sgl->dma_length);
+
+	//unmap dma_buf dma_buf_unmap_attachment
+	dma_buf_unmap_attachment(uring_dmabuf->attach, uring_dmabuf->sgt, DMA_BIDIRECTIONAL);
+
+	// detach dma_buf
+	dma_buf_detach(uring_dmabuf->attach->dmabuf, uring_dmabuf->attach);
+			
+	// put dma_buf
+	dma_buf_put(uring_dmabuf->attach->dmabuf);
+
+	// free
+	kfree(uring_dmabuf);
+}
+
+struct io_uring_dma_buf *dmabuf_get(struct request *req, struct io_ring_ctx *ctx, bool uring_dmabuf_exist)
+{
 	struct bio_vec bvec;
 	struct req_iterator iter;
-	struct io_ring_ctx *ctx;
 	struct io_mapped_ubuf *imu;
-	struct io_uring_dma_buf *uring_dmabuf;
+	struct io_uring_dma_buf *uring_dmabuf;	
 	unsigned int i, j;
 
+	rq_for_each_segment(bvec, req, iter) {
+		for (i = 0; i < ctx->nr_user_bufs; i++) {
+			imu = ctx->user_bufs[i];
+			for (j = 0; j < imu->nr_bvecs; j++) {
+				// all bvecs should be aligned with same shadow buffer, same dmabuf 
+				if(bvec.bv_page->index == imu->bvec[j].bv_page->index) {
+					if (uring_dmabuf_exist)
+					{
+						//printk(KERN_INFO "dmabuf_get valid uring_dmabuf found, updating... %d\n", imu->dma_buf);
+						uring_dmabuf = ctx->uring_dmabuf;
+						uring_dmabuf->curr_io_offset = imu->dma_buf_offset;
+						//printk(KERN_INFO "dmabuf_get ctx->uring_dmabuf->dma_buf_offset %d\n", ctx->uring_dmabuf->curr_io_offset);
+						return uring_dmabuf;
+					}
+					else {
+						//printk(KERN_INFO "dmabuf_get no valid uring_dmabuf found, creating... %d\n", imu->dma_buf);
+						uring_dmabuf = kzalloc(sizeof(*uring_dmabuf), GFP_KERNEL);
+						uring_dmabuf->dma_buf_fd     = imu->dma_buf;
+						uring_dmabuf->curr_io_offset = imu->dma_buf_offset;
+						return uring_dmabuf;
+					}
+				}
+			}
+		}
+	}	
+	return NULL;
+}
+
+struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req, struct device *dev)
+{
+	struct io_uring_task *tctx = current->io_uring;
+	struct io_ring_ctx *ctx;
+	struct dma_buf *dmabuf;
+	enum dma_data_direction dma_dir = rq_dma_dir(req);
+	int err;
+
+	// return null if not io_uring task
 	if (current->io_uring == NULL)
 		return NULL;
 		
@@ -1218,23 +1289,61 @@ struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req)
 	if (ctx == NULL)
 		return NULL;
 
-	rq_for_each_segment(bvec, req, iter) {
-		for (i = 0; i < ctx->nr_user_bufs; i++) {
-			imu = ctx->user_bufs[i];
-			for (j = 0; j < imu->nr_bvecs; j++) {
-				// all bvecs should be aligned with same shadow buffer, same dmabuf 
-				if(bvec.bv_page->index == imu->bvec[j].bv_page->index) {
-					uring_dmabuf = kzalloc(sizeof(*uring_dmabuf), GFP_KERNEL);
-					uring_dmabuf->dma_buf_fd = imu->dma_buf;
-					uring_dmabuf->dma_buf_offset = imu->dma_buf_offset;
-					return uring_dmabuf;
-				}
-			}
-		}
+	// return the current active pinned dmabuf
+	// if no valid pinned/premapped dmabuf, create one if registered
+
+	if(ctx->uring_dmabuf) {
+		ctx->uring_dmabuf = dmabuf_get(req, ctx, true);
+		return ctx->uring_dmabuf;
+	}
+	else
+		ctx->uring_dmabuf = dmabuf_get(req, ctx, false);
+
+	//ctx->uring_dmabuf = dmabuf_get(req, ctx);
+
+	// if valid dmabuf found, attach to the dev and map the SGL w/ DMA addresses
+	if(ctx->uring_dmabuf)
+	{
+		dmabuf = dma_buf_get(ctx->uring_dmabuf->dma_buf_fd);
+        if (IS_ERR(dmabuf))
+			return NULL;
+		
+        ctx->uring_dmabuf->attach = dma_buf_dynamic_attach(dmabuf, 
+							   			dev,
+							   			&dmabuf_attach_pinned_ops,
+							   			NULL);
+        if (IS_ERR(ctx->uring_dmabuf->attach)) {
+			goto attach_err;
+        }
+
+		dma_resv_lock(ctx->uring_dmabuf->attach->dmabuf->resv, NULL);
+		err = dma_buf_pin(ctx->uring_dmabuf->attach);
+		if (err)
+			goto map_err;
+
+        ctx->uring_dmabuf->sgt = dma_buf_map_attachment(ctx->uring_dmabuf->attach, DMA_BIDIRECTIONAL);
+		dma_resv_unlock(ctx->uring_dmabuf->attach->dmabuf->resv);
+
+		// cache the original sgl length and dma address
+		ctx->uring_dmabuf->orig_sgl_len     = ctx->uring_dmabuf->sgt->sgl->length;
+		ctx->uring_dmabuf->orig_dma_address = ctx->uring_dmabuf->sgt->sgl->dma_address;
+
+        if (IS_ERR(ctx->uring_dmabuf->sgt)) {
+            goto map_err;
+        }
 	}
 
-	return NULL;
+	return ctx->uring_dmabuf;
+
+map_err:
+    dma_buf_detach(dmabuf, ctx->uring_dmabuf->attach);
+
+attach_err:
+    dma_buf_put(dmabuf);
+
+	return ctx->uring_dmabuf;
 }
+
 EXPORT_SYMBOL(io_uring_get_dmabuf);
 
 static inline void io_tw_lock(struct io_ring_ctx *ctx, bool *locked)
@@ -3036,9 +3145,6 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	
 	if(opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA)
 	{
-		//printk(KERN_INFO "io_uring: io_prep_rw() SQE buf_index %u\n",  sqe->buf_index);	
-		//printk(KERN_INFO "io_uring: io_prep_rw() SQE fd_dma_buf %u\n", sqe->fd_dma_buf);
-
 		ctx->user_bufs[sqe->buf_index]->dma_buf = sqe->fd_dma_buf;
 		ctx->user_bufs[sqe->buf_index]->dma_buf_offset = sqe->off;	
 	}
@@ -9148,6 +9254,12 @@ static void __io_sqe_buffers_unregister(struct io_ring_ctx *ctx)
 	ctx->user_bufs = NULL;
 	ctx->buf_data = NULL;
 	ctx->nr_user_bufs = 0;
+
+	if(ctx->uring_dmabuf)
+	{
+		dmabuf_release(ctx->uring_dmabuf);
+		ctx->uring_dmabuf = NULL;
+	}
 }
 
 static int io_sqe_buffers_unregister(struct io_ring_ctx *ctx)
@@ -9343,7 +9455,7 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, struct iovec *iov,
 		off = 0;
 		size -= vec_len;
 
-		printk(KERN_INFO "io_uring: io_sqe_buffer_register imu->bvec[i].bv_page.index %lu imu->bvec[i].bv_len %u\n", imu->bvec[i].bv_page->index, imu->bvec[i].bv_len);
+		//printk(KERN_INFO "io_uring: io_sqe_buffer_register imu->bvec[i].bv_page.index %lu imu->bvec[i].bv_len %u\n", imu->bvec[i].bv_page->index, imu->bvec[i].bv_len);
 	}
 	/* store original address for later verification */
 	imu->ubuf = ubuf;
