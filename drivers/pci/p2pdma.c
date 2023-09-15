@@ -524,7 +524,7 @@ check_b_path_acs:
 	acs_redirects = true;
 
 map_through_host_bridge:
-	printk(KERN_INFO "pci_p2pdma_distance_many map_through_host_bridge cpu_supports_p2pdma %d\n", cpu_supports_p2pdma());
+	//printk(KERN_INFO "pci_p2pdma_distance_many map_through_host_bridge cpu_supports_p2pdma %d\n", cpu_supports_p2pdma());
 
 	if (!cpu_supports_p2pdma() &&
 	    !host_bridge_whitelist(provider, client, acs_redirects)) {
@@ -584,7 +584,7 @@ int pci_p2pdma_distance_many(struct pci_dev *provider, struct device **clients,
 		map = calc_map_type_and_dist(provider, pci_client, &distance,
 					     verbose);
 
-		printk(KERN_INFO "pci_p2pdma_distance_many map %d\n", map);
+		//printk(KERN_INFO "pci_p2pdma_distance_many map %d\n", map);
 
 		pci_dev_put(pci_client);
 
