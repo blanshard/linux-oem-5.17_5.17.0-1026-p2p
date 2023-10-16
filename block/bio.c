@@ -1091,6 +1091,8 @@ void bio_iov_bvec_set(struct bio *bio, struct iov_iter *iter)
 	bio->bi_iter.bi_size = size;
 	bio_set_flag(bio, BIO_NO_PAGE_REF);
 	bio_set_flag(bio, BIO_CLONED);
+	bio->dma_mapping = iter->dma_mapping;
+	bio->dma_buf_fd  = iter->dma_buf_fd;
 }
 
 static void bio_put_pages(struct page **pages, size_t size, size_t off)

@@ -214,6 +214,7 @@ struct io_mapped_ubuf {
 	u64		ubuf_end;
 	s32		dma_buf;
 	s32		dma_buf_offset;
+	void    *dma_mapping;
 	unsigned int	nr_bvecs;
 	unsigned long	acct_pages;
 	struct bio_vec	bvec[];
@@ -1274,21 +1275,11 @@ struct io_uring_dma_buf *dmabuf_get(struct request *req, struct io_ring_ctx *ctx
 
 struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req, struct device *dev)
 {
-	struct io_uring_task *tctx = current->io_uring;
-	struct io_ring_ctx *ctx;
 	struct dma_buf *dmabuf;
-	enum dma_data_direction dma_dir = rq_dma_dir(req);
+	struct io_ring_ctx *ctx = (struct io_ring_ctx *)blk_rq_dma_mapping(req);
 	int err;
 
-	// return null if not io_uring task
-	if (current->io_uring == NULL)
-		return NULL;
-		
-	ctx = tctx->last;
-	
-	if (ctx == NULL)
-		return NULL;
-
+	//printk(KERN_INFO "io_uring_get_dmabuf dma_buf_fd %d\n", blk_rq_dma_buf_fd(req));
 	// return the current active pinned dmabuf
 	// if no valid pinned/premapped dmabuf, create one if registered
 
@@ -1298,8 +1289,6 @@ struct io_uring_dma_buf *io_uring_get_dmabuf(struct request *req, struct device 
 	}
 	else
 		ctx->uring_dmabuf = dmabuf_get(req, ctx, false);
-
-	//ctx->uring_dmabuf = dmabuf_get(req, ctx);
 
 	// if valid dmabuf found, attach to the dev and map the SGL w/ DMA addresses
 	if(ctx->uring_dmabuf)
@@ -3146,7 +3135,8 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	if(opcode == IORING_OP_READ_DMA || opcode == IORING_OP_WRITE_DMA)
 	{
 		ctx->user_bufs[sqe->buf_index]->dma_buf = sqe->fd_dma_buf;
-		ctx->user_bufs[sqe->buf_index]->dma_buf_offset = sqe->off;	
+		ctx->user_bufs[sqe->buf_index]->dma_buf_offset = sqe->off;
+		ctx->user_bufs[sqe->buf_index]->dma_mapping = ctx;
 	}
 
 	kiocb->ki_pos = READ_ONCE(sqe->off);
@@ -3243,6 +3233,9 @@ static int __io_import_fixed(struct io_kiocb *req, int rw, struct iov_iter *iter
 	 */
 	offset = buf_addr - imu->ubuf;
 	iov_iter_bvec(iter, rw, imu->bvec, imu->nr_bvecs, offset + len);
+
+	iter->dma_mapping = imu->dma_mapping;
+	iter->dma_buf_fd  = imu->dma_buf;
 
 	if (offset) {
 		/*
@@ -9461,6 +9454,9 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, struct iovec *iov,
 	imu->ubuf = ubuf;
 	imu->ubuf_end = ubuf + iov->iov_len;
 	imu->nr_bvecs = nr_pages;
+	imu->dma_buf = 0;
+	imu->dma_buf_offset = 0;
+	imu->dma_mapping  = NULL;
 	*pimu = imu;
 	ret = 0;
 done:

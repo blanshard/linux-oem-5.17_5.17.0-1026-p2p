@@ -287,6 +287,9 @@ struct bio {
 
 	struct bio_vec		*bi_io_vec;	/* the actual vec list */
 
+	void 		 		*dma_mapping;
+	unsigned int 		dma_buf_fd;
+
 	struct bio_set		*bi_pool;
 
 	/*

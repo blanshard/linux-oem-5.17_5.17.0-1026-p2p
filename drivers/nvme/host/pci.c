@@ -852,31 +852,46 @@ static blk_status_t nvme_dmabuf_map_data(struct nvme_dev *dev, struct request *r
 	unsigned int req_size = blk_rq_payload_bytes(req);
 	struct io_uring_dma_buf *uring_dmabuf;
 
+	struct scatterlist *sg;
+	int i;
+
 	int nr_mapped = 0;
-
 	iod->is_dmabuf_io = false;
-
-	//if(!is_io_uring_task())
-	//	return ret;
 
 	uring_dmabuf = io_uring_get_dmabuf(req, dev->dev);
 
     if (uring_dmabuf != NULL) {
 		// cache the uring_dmabuf pointer to update and restore the sgl per command
 		iod->uring_dmabuf = uring_dmabuf;
-		
+
+		/*
+		for_each_sgtable_dma_sg(uring_dmabuf->sgt, sg, i) {
+			printk(KERN_INFO "nvme_map_data dmabuf sgt->sgl dma_addr %llu dma_len %llu\n", uring_dmabuf->sgt->sgl->dma_address, uring_dmabuf->sgt->sgl->dma_length);
+			printk(KERN_INFO "nvme_map_data dmabuf sg index %d dma_addr %llu dma_len %llu\n", i, sg->dma_address, sg->dma_length);
+		}
+		*/
+
+		/*
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf curr_io_offset %d\n", 	  uring_dmabuf->curr_io_offset);
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf req_size %d\n",           req_size);
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf orig_dma_address %llu\n", uring_dmabuf->orig_dma_address);		
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf orig_sgl_len %llu\n", 	  uring_dmabuf->orig_sgl_len);
+		*/
+
 		// update the sgl per request size and offset
-		if( (uring_dmabuf->curr_io_offset + req_size) <= uring_dmabuf->orig_sgl_len)
+		//if( (uring_dmabuf->curr_io_offset + req_size) <= uring_dmabuf->orig_sgl_len)
 		{
 			uring_dmabuf->sgt->sgl->length        	= req_size;
 			uring_dmabuf->sgt->sgl->dma_length     	= req_size;
 			sg_dma_address(uring_dmabuf->sgt->sgl)	= uring_dmabuf->orig_dma_address + uring_dmabuf->curr_io_offset;
 		}
 
-		//printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf length %d\n", uring_dmabuf->sgt->sgl->length);
-		//printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf dma_length %d\n", uring_dmabuf->sgt->sgl->dma_length);
-		//printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf sg_dma_address %llu\n", sg_dma_address(uring_dmabuf->sgt->sgl));
-		//printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf nents %d\n", uring_dmabuf->sgt->nents);
+		/*
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf length %d\n", uring_dmabuf->sgt->sgl->length);
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf dma_length %d\n", uring_dmabuf->sgt->sgl->dma_length);
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf sg_dma_address %llu\n", sg_dma_address(uring_dmabuf->sgt->sgl));
+		printk(KERN_INFO "nvme_dmabuf_map_data uring_dmabuf nents %d\n", uring_dmabuf->sgt->nents);
+		*/
 
         iod->dma_len = 0;
         iod->sg = uring_dmabuf->sgt->sgl;
@@ -904,9 +919,12 @@ static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
 	blk_status_t ret = BLK_STS_RESOURCE;
 	int nr_mapped;
 
-	ret = nvme_dmabuf_map_data(dev, req, cmnd);
-	if(iod->is_dmabuf_io) {
-		return ret;
+	if ( blk_rq_dma_buf_fd(req) )
+	{
+		//printk(KERN_INFO "nvme_map_data dma buf fd %d dma_mapping pointer %p\n", blk_rq_dma_buf_fd(req), blk_rq_dma_mapping(req));
+		ret = nvme_dmabuf_map_data(dev, req, cmnd);
+		if(iod->is_dmabuf_io)
+			return ret;
 	}
 
 	if (blk_rq_nr_phys_segments(req) == 1) {
